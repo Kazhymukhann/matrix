@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/kazhyreimbayev/Downloads/**)",
+      "Bash(unzip -l /Users/kazhyreimbayev/Downloads/Aurora_Demo.zip)"
+    ]
+  }
+}
