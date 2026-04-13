@@ -16,10 +16,9 @@
 ### Контроллер
 - **MCU**: ESP32-D0WD-V3 (Dual Core, 240MHz, 320KB RAM, 4MB Flash)
 - **Плата**: ESP32 Dev Module (generic)
-- **MAC**: d4:e9:f4:b5:0f:18
 - **USB чип**: CH340 (порт /dev/cu.usbserial-110 на macOS)
 
-### Распиновка ESP32 → HUB75 (PxMatrix, одна панель)
+### Распиновка ESP32 → HUB75
 
 | Сигнал   | GPIO | Описание                          |
 |----------|------|-----------------------------------|
@@ -27,80 +26,11 @@
 | CLK      | 14   | Тактовый сигнал (SPI CLK)         |
 | A        | 19   | Адресная линия 0                  |
 | B        | 23   | Адресная линия 1                  |
+| C        | 18   | Адресная линия 2 (НЕ используется для 1/4 scan, не подключён) |
 | STB/LAT  | 22   | Latch — защёлка данных            |
 | P_OE     | 16   | Output Enable                     |
 
-**Важно**: пины CLK=14 и R1=13 — дефолтные SPI пины PxMatrix для ESP32.
-
-## Прошивка по воздуху (OTA)
-
-### Как это работает
-ESP32 подключается к домашнему WiFi и слушает OTA-обновления. Можно прошивать по IP без USB кабеля.
-
-### Первоначальная настройка (один раз по USB)
-1. Залить прошивку с поддержкой OTA через USB:
-   ```bash
-   # В platformio.ini должно быть upload_protocol = esptool (USB)
-   ~/.platformio/penv/bin/pio run -t upload
-   ```
-2. ESP32 подключится к WiFi и получит IP (смотреть в Serial или роутере)
-3. Найти ESP32 в сети:
-   ```bash
-   ping qoima-matrix.local
-   ```
-
-### Дальнейшие прошивки по WiFi
-1. В `platformio.ini` включить OTA:
-   ```ini
-   upload_protocol = espota
-   upload_port = 192.168.31.81    ; IP вашего ESP32
-   ```
-2. Прошивать как обычно:
-   ```bash
-   ~/.platformio/penv/bin/pio run -t upload
-   ```
-3. Прошивка идёт по WiFi, USB не нужен!
-
-### Важные моменты OTA
-- **WiFi должен подключиться ДО запуска таймера дисплея** — иначе crash (xQueueSemaphoreTake)
-- **Дисплей отключается во время OTA** — флаг `otaInProgress` блокирует ISR
-- **После OTA ESP32 автоматически перезагружается** с новым кодом
-- **Если OTA сломается** — всегда можно прошить обратно по USB
-- **mDNS имя**: `qoima-matrix.local` (можно пинговать вместо IP)
-
-### Минимальный код с OTA
-```cpp
-#include <Arduino.h>
-#include <WiFi.h>
-#include <ArduinoOTA.h>
-
-const char* WIFI_SSID = "Admin";
-const char* WIFI_PASS = "92211667";
-
-void setup() {
-  // 1. Подключиться к WiFi
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  while (WiFi.status() != WL_CONNECTED) delay(500);
-
-  // 2. Запустить OTA
-  ArduinoOTA.setHostname("qoima-matrix");
-  ArduinoOTA.begin();
-
-  // 3. Теперь можно запускать дисплей и остальное
-}
-
-void loop() {
-  ArduinoOTA.handle();  // обязательно в loop!
-  // ... остальной код ...
-}
-```
-
-### Текущий IP
-- **WiFi сеть**: Admin
-- **IP ESP32**: 192.168.31.81
-- **mDNS**: qoima-matrix.local
-- **OTA hostname**: qoima-matrix
+**Важно**: пины CLK=14 и R1=13 — это дефолтные SPI пины PxMatrix для ESP32. Они НЕ передаются в конструктор, а используются автоматически через SPI.
 
 ## Софт
 
@@ -116,69 +46,115 @@ platform = espressif32
 board = esp32dev
 framework = arduino
 monitor_speed = 9600
-upload_speed = 460800
+upload_speed = 460800       ; 921600 вызывает ошибки на этом кабеле/чипе
 lib_deps =
     adafruit/Adafruit GFX Library@^1.11.9
     2dom/PxMatrix LED MATRIX library@^1.8.2
-
-; OTA прошивка по WiFi:
-upload_protocol = espota
-upload_port = 192.168.31.81
+    fastled/FastLED@^3.6.0  ; нужна для Aurora эффектов, можно убрать если не используешь
 ```
 
 ### Библиотеки
-1. **PxMatrix** (2dom/PxMatrix LED MATRIX library) — драйвер HUB75 панелей (одна панель)
-2. **Adafruit GFX** — графическая библиотека (шрифты, примитивы)
-3. **ArduinoOTA** — прошивка по WiFi (встроена в ESP32 Arduino Core)
+1. **PxMatrix** (2dom/PxMatrix LED MATRIX library) — драйвер HUB75 панелей. Наследует Adafruit GFX, даёт drawPixel, drawLine, print и т.д.
+2. **Adafruit GFX** — базовая графическая библиотека (шрифты, примитивы). Зависимость PxMatrix.
+3. **FastLED** — нужна только если используешь Aurora demo эффекты. Для кастомных эффектов не обязательна.
 
 ## Критические настройки дисплея
 
 ```cpp
-#define PxMATRIX_double_buffer true
+// Обязательно ДО #include <PxMatrix.h>
+#define PxMATRIX_double_buffer true   // двойная буферизация, без неё мерцание
 
+// Конструктор: ширина, высота, LAT, OE, адресные пины
 PxMATRIX display(32, 16, P_LAT, P_OE, P_A, P_B);
+//                                          ^^^^
+//  Только A и B — для 1/4 scan на 16 строк (2 адресных линии = 4 группы)
+//  НЕ передавать P_C — он не подключён!
 
-display.begin(4);                  // 1/4 scan
-display.setFastUpdate(true);
-display.setScanPattern(ZAGZIG);
+// В setup():
+display.begin(4);                  // 1/4 scan — ОБЯЗАТЕЛЬНО 4, не 8!
+display.setFastUpdate(true);       // быстрое обновление
+display.setScanPattern(ZAGZIG);    // ИМЕННО ZAGZIG для этой панели
+// НЕ вызывать setPanelsWidth() — у нас одна панель (default = 1)
 ```
 
 ### Что было пробовано и НЕ работает:
-- `begin(8)` — дублирует верх/низ
-- Другие scan patterns (LINE, ZIGZAG и т.д.) — артефакты на одной панели
-- **Мульти-панель через PxMatrix** — НЕ РАБОТАЕТ для этих P10 панелей
-  - setPanelsWidth(2,3,4) — текст разбросан на все scan patterns
-  - 512x16 цепочка — ничего не показывает
-  - Причина: PxMatrix применяет scan remapping глобально, а не per-panel
-
-### Мульти-панель: что работает
-- **3 панели в линию (96x16)**: цепочка шлейфами OUT→IN подтверждена
-- Сплошные цвета отображаются правильно (зелёный/красный/синий на 3 панелях)
-- Текст НЕ рендерится корректно из-за scan pattern remapping
-- **Для мульти-панель рекомендуется**: ESP32-HUB75-MatrixPanel-I2S-DMA (нужна другая распиновка, 11 проводов вместо 6)
+- `display(64, 16, ...)` с `setPanelsWidth(2)` — дублирование/артефакты (это для 2 панелей)
+- `begin(8)` — показывает чётко но дублирует верх/низ
+- Другие scan pattern (LINE, ZIGZAG, ZAGGIZ и т.д.) — артефакты
 
 ## Обновление дисплея (ISR)
+
+Дисплей обновляется через аппаратный таймер ESP32 каждые 2мс:
 
 ```cpp
 hw_timer_t *timer = NULL;
 portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
-uint8_t display_draw_time = 1;
+uint8_t display_draw_time = 1;  // время свечения в мкс (больше = ярче, но может крашить)
 
 void IRAM_ATTR display_updater() {
-  if (otaInProgress) return;  // не обновлять во время OTA!
   portENTER_CRITICAL_ISR(&timerMux);
   display.display(display_draw_time);
   portEXIT_CRITICAL_ISR(&timerMux);
 }
 
 // Включить обновление:
-timer = timerBegin(0, 80, true);
+timer = timerBegin(0, 80, true);           // таймер 0, делитель 80 (1МГц)
 timerAttachInterrupt(timer, &display_updater, true);
-timerAlarmWrite(timer, 2000, true);
+timerAlarmWrite(timer, 2000, true);        // каждые 2000мкс = 2мс
 timerAlarmEnable(timer);
 ```
 
-**Внимание**: WiFi ДОЛЖЕН подключиться ДО запуска таймера!
+**Внимание**: это API для ESP32 Arduino Core 2.x. В Core 3.x API таймеров изменился!
+
+## Паттерн рисования (game loop)
+
+```cpp
+void loop() {
+  display.clearDisplay();       // очистить буфер (не экран!)
+  // ... рисуем пиксели, текст, линии ...
+  display.showBuffer();         // показать буфер на экране (swap)
+  delay(20);                    // задержка кадра
+}
+```
+
+- `clearDisplay()` — очищает задний буфер
+- `showBuffer()` — переключает буферы (double buffering)
+- Без double buffer: рисуем прямо в display, без showBuffer()
+
+## Цвета
+
+PxMatrix использует 16-bit RGB565:
+```cpp
+uint16_t color = display.color565(R, G, B);  // R,G,B: 0-255
+```
+
+HSV → RGB565 конвертер есть в коде (функция `hsv()`).
+
+## Текст (Adafruit GFX)
+
+```cpp
+display.setTextWrap(false);        // отключить перенос строк
+display.setTextSize(1);            // 1 = 6x8 пикселей на символ
+display.setTextColor(color);
+display.setCursor(x, y);           // x,y = верхний левый угол
+display.print("Text");
+```
+
+Размеры текста:
+- Size 1: 6x8 px на символ. "Qoima" = 30px шириной
+- Size 2: 12x16 px на символ — ЗАПОЛНЯЕТ ВСЮ высоту 16px дисплея
+
+## Структура проекта
+
+```
+matrix/
+├── platformio.ini          # конфигурация проекта
+├── src/
+│   └── main.cpp            # основной код с эффектами
+├── include/                # (пусто)
+├── lib/                    # (пусто)
+└── .pio/                   # сборка, зависимости (автогенерация)
+```
 
 ## Команды
 
@@ -186,34 +162,29 @@ timerAlarmEnable(timer);
 # Сборка
 ~/.platformio/penv/bin/pio run
 
-# Прошивка по USB (первый раз)
-# В platformio.ini: upload_protocol = esptool
+# Сборка + прошивка
 ~/.platformio/penv/bin/pio run -t upload
-
-# Прошивка по WiFi (OTA)
-# В platformio.ini: upload_protocol = espota, upload_port = 192.168.31.81
-~/.platformio/penv/bin/pio run -t upload
-
-# Стереть flash полностью
-~/.platformio/penv/bin/pio run -t erase
 
 # Serial монитор
 ~/.platformio/penv/bin/pio device monitor
-
-# Найти ESP32 в сети
-ping qoima-matrix.local
 ```
 
-## Структура проекта
+## Текущие эффекты в коде
 
-```
-matrix/
-├── platformio.ini              # конфигурация (USB и OTA)
-├── HARDWARE_GUIDE.md           # этот файл
-├── main_1panel.cpp.bak         # бэкап кода для 1 панели с эффектами
-├── src/
-│   └── main.cpp                # текущий код (OTA + LED blink)
-├── include/
-├── lib/
-└── .pio/                       # сборка (автогенерация)
-```
+1. **Qoima Intro** — бегущая строка "Qoima" + логотип Q выезжает справа
+2. **Matrix Rain** — зелёный дождь из "Матрицы"
+3. **Rainbow Plasma** — радужные синусоидальные волны
+4. **Fireworks** — фейерверки с физикой гравитации
+5. **Fire** — реалистичный огонь (пропагация тепла снизу вверх)
+6. **Starfield** — 3D звёздное поле с ускорением
+7. **Bouncing Logo** — логотип Qoima прыгает как DVD screensaver
+8. **Snake** — змейка с простым AI (идёт к еде, избегает себя)
+
+## Логотип Qoima
+
+Генерируется математически в `computeLogo()` — 14x14 пикселей:
+- Толстое кольцо (outer R=5.9, inner R=2.8, центр 5.5,5.5)
+- Вырез справа-снизу (gap для хвоста Q, углы 0.25-1.25 рад)
+- Квадрат внутри кольца (пиксели 4-6, 4-6)
+- Диагональный хвост (от 8,8 до 12,12)
+- Маленький квадрат на конце хвоста (11-12, 11-12)
